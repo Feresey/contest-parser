@@ -82,6 +82,7 @@ func (p *Parser) InitEmitters(u *url.URL) {
 	p.SubmissionsEmitter.cli = p.cli
 	p.HrefEmitter.originalHref = u
 	p.StandingsEmitter.originalHref = u
+	p.ProblemsEmitter.originalHref = u
 }
 
 func (p *Parser) loginContest(ctx context.Context) (*url.URL, error) {
@@ -220,6 +221,24 @@ func fileName(lang string) string {
 	}
 }
 
+type PdfWriter interface {
+	GeneratePdf(w io.Writer) error
+}
+
+func writePdf(writer PdfWriter, path ...string) error {
+	out := filepath.Join(path...)
+	file, err := os.Create(out)
+	if err != nil {
+		return fmt.Errorf("standings: %w", err)
+	}
+	defer file.Close()
+
+	if err := writer.GeneratePdf(file); err != nil {
+		return fmt.Errorf("generate %q: %w", out, err)
+	}
+	return nil
+}
+
 func (p *Parser) WriteData(out string) error {
 	stat, err := os.Stat(out)
 	if err != nil {
@@ -239,15 +258,12 @@ func (p *Parser) WriteData(out string) error {
 		return err
 	}
 
-	standingsOut := filepath.Join(out, "standings.pdf")
-	standingsFile, err := os.Create(standingsOut)
-	if err != nil {
-		return fmt.Errorf("standings: %w", err)
+	if err := writePdf(&p.StandingsEmitter, out, "standings.pdf"); err != nil {
+		return err
 	}
-	defer standingsFile.Close() //?
 
-	if err := p.StandingsEmitter.GeneratePdf(standingsFile); err != nil {
-		return fmt.Errorf("generate standings: %w", err)
+	if err := writePdf(&p.ProblemsEmitter, out, "summary.pdf"); err != nil {
+		return err
 	}
 
 	problemsMap := make(map[string]*Problem)

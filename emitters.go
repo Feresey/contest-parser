@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,7 +14,24 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/SebastiaanKlippert/go-wkhtmltopdf"
 	"go.uber.org/zap"
+	"golang.org/x/net/html"
 )
+
+func GeneratePdf(r io.Reader, w io.Writer) error {
+	gen, err := wkhtmltopdf.NewPDFGenerator()
+	if err != nil {
+		return err
+	}
+	gen.Orientation.Set("landscape")
+	page := wkhtmltopdf.NewPageReader(r)
+	page.Encoding.Set("utf8")
+	gen.AddPage(page)
+	if err := gen.Create(); err != nil {
+		return err
+	}
+	_, err = gen.Buffer().WriteTo(w)
+	return err
+}
 
 type Emitter interface {
 	Emit(context.Context, *goquery.Selection) error
@@ -85,6 +103,7 @@ type Problem struct {
 }
 
 type ProblemsEmitter struct {
+	originalHref *url.URL
 	Problems     []*Problem
 	SummaryTable string
 }
@@ -92,11 +111,27 @@ type ProblemsEmitter struct {
 func (pe *ProblemsEmitter) Emit(_ context.Context, doc *goquery.Selection) error {
 	sel := doc.Find(`table[class=b1] > tbody > tr`)
 
-	raw, err := sel.Html()
+	tbl := doc.Find(`table[class=b1]`)
+	buf := new(bytes.Buffer)
+	link := doc.Find(`link[href]`)
+	href, found := link.Attr("href")
+	if found {
+		u, err := pe.originalHref.Parse(href)
+		if err != nil {
+			return fmt.Errorf("change href address: %w", err)
+		}
+		link.SetAttr("href", u.String())
+	}
+	err := html.Render(buf, link.Nodes[0])
 	if err != nil {
 		return err
 	}
-	pe.SummaryTable = raw
+	err = html.Render(buf, tbl.Nodes[0])
+	if err != nil {
+		return err
+	}
+	pe.SummaryTable = buf.String()
+	// ioutil.WriteFile("out.html", buf.Bytes(), 0644)
 
 	var names []string
 	first := sel.First()
@@ -140,6 +175,10 @@ func (pe *ProblemsEmitter) decodeProblem(names, cols []string) (res *Problem, er
 		}
 	}
 	return
+}
+
+func (pe *ProblemsEmitter) GeneratePdf(w io.Writer) error {
+	return GeneratePdf(strings.NewReader(pe.SummaryTable), w)
 }
 
 type Submission struct {
@@ -262,20 +301,12 @@ func (s *StandingsEmitter) Emit(_ context.Context, doc *goquery.Selection) error
 		}
 		link.SetAttr("href", u.String())
 	}
+	doc.Find(`head > meta[content]`).SetAttr("content", "text/html; charset=utf-8")
 	raw, err := doc.Html()
 	s.StandingsPage = raw
 	return err
 }
 
 func (s *StandingsEmitter) GeneratePdf(w io.Writer) error {
-	gen, err := wkhtmltopdf.NewPDFGenerator()
-	if err != nil {
-		return err
-	}
-	gen.AddPage(wkhtmltopdf.NewPageReader(strings.NewReader(s.StandingsPage)))
-	if err := gen.Create(); err != nil {
-		return err
-	}
-	_, err = gen.Buffer().WriteTo(w)
-	return err
+	return GeneratePdf(strings.NewReader(s.StandingsPage), w)
 }

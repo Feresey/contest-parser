@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -23,14 +24,79 @@ var (
 	log, _ = lc.Build()
 )
 
+func loginContest(
+	ctx context.Context,
+	cli *http.Client,
+	uri string,
+	username, password string,
+	contestID int,
+) (*url.URL, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return nil, err
+	}
+
+	q := make(url.Values)
+	q.Set("login", username)
+	q.Set("password", password)
+	q.Set("role", "0")
+	q.Set("locale_id", "0")
+	q.Set("submit", "Log in")
+	q.Set("contest_id", strconv.Itoa(contestID))
+
+	u.RawQuery = q.Encode()
+
+	log.Debug("url", zap.Stringer("url", u))
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    u,
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req = req.WithContext(cctx)
+	resp, err := cli.Do(req)
+	if err != nil {
+		log.Error("do request", zap.Error(err))
+		return nil, err
+	}
+	defer resp.Body.Close()
+	log.Debug("code", zap.Int("code", resp.StatusCode))
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	href, found := doc.Find(`.user_actions .contest_actions_item > a`).Attr("href")
+	if !found {
+		raw, _ := doc.Html()
+		print(raw)
+		return nil, fmt.Errorf("href not found")
+	}
+
+	return url.Parse(href)
+}
+
 func main() {
+	var (
+		username, password string
+		contestID          int
+		baseURL            string
+		output             string
+	)
+
+	flag.StringVar(&username, "username", "msknord13", "")
+	flag.StringVar(&password, "password", "", "")
+	flag.IntVar(&contestID, "contest-id", 10521, "context id (10521, 10523, ...)")
+	flag.StringVar(&baseURL, "url", "http://opentrains.snarknews.info/~ejudge/team.cgi", "path to contest site")
+	flag.StringVar(&output, "o", "out.json", "path to output file with contest data")
+	flag.Parse()
+
 	cli := &http.Client{
 		Transport: http.DefaultTransport,
 		Timeout:   5 * time.Second,
-	}
-	uri, err := url.Parse("http://opentrains.snarknews.info/~ejudge/team.cgi?SID=7aeb0fad26706f08")
-	if err != nil {
-		panic(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,24 +108,30 @@ func main() {
 		cancel()
 	}()
 
+	uri, err := loginContest(ctx, cli, baseURL, username, password, contestID)
+	if err != nil {
+		log.Panic("login failed", zap.Error(err))
+	}
+	log.Debug("context url", zap.Stringer("url", uri))
+
 	he := &HrefEmitter{}
 	if err := Do(ctx, cli, uri, he); err != nil {
-		log.Panic("process body", zap.Error(err))
+		log.Panic("parse hrefs", zap.Error(err))
 	}
 
 	pe := &ProblemsEmitter{}
 	if err := Do(ctx, cli, he.SummaryHref, pe); err != nil {
-		log.Panic("process body", zap.Error(err))
+		log.Panic("parse problems", zap.Error(err))
 	}
 
 	se := &SubmissionsEmitter{
 		cli: cli,
 	}
 	if err := Do(ctx, cli, he.SubmissionsHref, se); err != nil {
-		log.Panic("process body", zap.Error(err))
+		log.Panic("parse submissions", zap.Error(err))
 	}
 
-	out, err := os.Create("out.json")
+	out, err := os.Create(output)
 	if err != nil {
 		panic(err)
 	}
@@ -153,7 +225,7 @@ func eachCol(ss *[]string) func(i int, s *goquery.Selection) {
 }
 
 type Problem struct {
-	ID    int
+	ID    string
 	Name  string
 	RunID int
 	OK    bool
@@ -192,10 +264,7 @@ func (p *ProblemsEmitter) decodeProblem(names, cols []string) (res *Problem, err
 	for idx, name := range names {
 		switch name {
 		case "Short name":
-			res.ID, err = strconv.Atoi(cols[idx])
-			if err != nil {
-				err = fmt.Errorf("decode short name: %w", err)
-			}
+			res.ID = cols[idx]
 		case "Long name":
 			res.Name = cols[idx]
 		case "Status":
@@ -214,7 +283,7 @@ func (p *ProblemsEmitter) decodeProblem(names, cols []string) (res *Problem, err
 }
 
 type Submission struct {
-	ProblemID  int
+	ProblemID  string
 	Language   string
 	sourceHref *url.URL
 	Source     []byte
@@ -231,7 +300,7 @@ func (se *SubmissionsEmitter) Emit(ctx context.Context, doc *goquery.Selection) 
 
 	var (
 		names             []string
-		uniqueSubmissions = make(map[int]struct{})
+		uniqueSubmissions = make(map[string]struct{})
 		errRet            error
 	)
 
@@ -277,10 +346,7 @@ func (se *SubmissionsEmitter) decodeSubmission(names, cols []string) (res *Submi
 	for idx, name := range names {
 		switch name {
 		case "Problem":
-			res.ProblemID, err = strconv.Atoi(cols[idx])
-			if err != nil {
-				err = fmt.Errorf("decode problem id: %w", err)
-			}
+			res.ProblemID = cols[idx]
 		case "Language":
 			res.Language = cols[idx]
 		case "Result":
